@@ -383,6 +383,8 @@ class VirtualKITTI2(Dataset):
 class MixDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_list):
         # 
+        dataset_list[0].pairs = dataset_list[0].pairs * 3
+        # 
         num_objects = 0
         for dataset in dataset_list:
             num_objects += len(dataset)

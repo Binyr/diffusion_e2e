@@ -387,10 +387,11 @@ def main():
         train_dataset_hypersim = Hypersim(root_dir=hypersim_root_dir, transform=True)
         train_dataset_vkitti   = VirtualKITTI2(root_dir=vkitti_root_dir, transform=True)
     mix_dataset = MixDataset([train_dataset_hypersim, train_dataset_vkitti])
-    sampler = RatioMixSampler(mix_dataset, [9, 1])
+    # sampler = RatioMixSampler(mix_dataset, [9, 1])
     train_dataloader = torch.utils.data.DataLoader(
         mix_dataset,
-        sampler=sampler,
+        shuffle=True,
+        # sampler=sampler,
         batch_size=args.train_batch_size,
         num_workers=args.dataloader_num_workers,
         pin_memory=True
@@ -438,7 +439,7 @@ def main():
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset_vkitti)+len(train_dataset_hypersim)}")
+    logger.info(f"  Num examples = {len(train_dataset_vkitti)+len(train_dataset_hypersim)} {len(mix_dataset)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
