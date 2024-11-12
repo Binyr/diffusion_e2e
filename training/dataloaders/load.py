@@ -145,10 +145,10 @@ class SynchronizedTransform_VKITTI:
         if normal_image is not None:
             normal_tensor = self.to_tensor(normal_image)
         # kitti benchmark crop
-        rgb_tensor = self.kitti_benchmark_crop(rgb_tensor)
-        depth_tensor = self.kitti_benchmark_crop(depth_tensor)
+        rgb_tensor = self.kitti_benchmark_crop(rgb_tensor, H=self.H, W=self.W)
+        depth_tensor = self.kitti_benchmark_crop(depth_tensor, H=self.H, W=self.W)
         if normal_image is not None:
-            normal_tensor = self.kitti_benchmark_crop(normal_tensor)
+            normal_tensor = self.kitti_benchmark_crop(normal_tensor, H=self.H, W=self.W)
         # return
         if normal_image is not None:
             return rgb_tensor, depth_tensor, normal_tensor

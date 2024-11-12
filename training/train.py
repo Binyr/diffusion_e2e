@@ -508,9 +508,10 @@ def main():
             with accelerator.accumulate(unet):     
                 
                 # RGB latent
+                # print(batch["rgb"].shape)
                 rgb_latents = encode_image(vae, batch["rgb"].to(device=accelerator.device, dtype=weight_dtype))
                 rgb_latents = rgb_latents * vae.config.scaling_factor
-         
+                # print(rgb_latents.shape)
                 # Validity mask
                 val_mask = batch["val_mask"].bool().to(device=accelerator.device)
 
