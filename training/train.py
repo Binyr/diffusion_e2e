@@ -33,6 +33,7 @@ from util.noise import pyramid_noise_like
 from util.loss import ScaleAndShiftInvariantLoss, AngularLoss
 from util.unet_prep import replace_unet_conv_in
 from util.lr_scheduler import IterExponential
+from model import IntrinsicUNetSpatioTemporalConditionModel
 
 if is_wandb_available():
     import wandb
@@ -298,7 +299,21 @@ def main():
     tokenizer    = CLIPTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision)
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant)
     vae          = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant)
-    unet         = UNet2DConditionModel.from_pretrained( args.pretrained_model_name_or_path, subfolder="unet", revision=None)
+    if not args.use_svd:
+        unet         = UNet2DConditionModel.from_pretrained( args.pretrained_model_name_or_path, subfolder="unet", revision=None)
+    else:
+        unet = IntrinsicUNetSpatioTemporalConditionModel.from_pretrained(
+            "stabilityai/stable-video-diffusion-img2vid-xt",
+            subfolder="unet",
+            low_cpu_mem_usage=True,
+            variant="fp16",
+        )
+        unet.post_init(
+            new_out_channels= 4,
+            new_cond_channels= 4,
+        )
+        unet.custom_gradient_checkpointing = True
+
     if args.noise_type is not None:
         # Double UNet input layers if necessary
         if unet.config['in_channels'] != 8:
@@ -365,8 +380,12 @@ def main():
     # Training datasets
     hypersim_root_dir = "data/hypersim/processed"
     vkitti_root_dir   = "data/virtual_kitti_2"
-    train_dataset_hypersim = Hypersim(root_dir=hypersim_root_dir, transform=True)
-    train_dataset_vkitti   = VirtualKITTI2(root_dir=vkitti_root_dir, transform=True)
+    if args.use_svd:
+        train_dataset_hypersim = Hypersim(root_dir=hypersim_root_dir, transform=True, H=576, W=768)
+        train_dataset_vkitti   = VirtualKITTI2(root_dir=vkitti_root_dir, transform=True, H=320, W=1088)
+    else:
+        train_dataset_hypersim = Hypersim(root_dir=hypersim_root_dir, transform=True)
+        train_dataset_vkitti   = VirtualKITTI2(root_dir=vkitti_root_dir, transform=True)
     mix_dataset = MixDataset([train_dataset_hypersim, train_dataset_vkitti])
     sampler = RatioMixSampler(mix_dataset, [9, 1])
     train_dataloader = torch.utils.data.DataLoader(
@@ -545,7 +564,7 @@ def main():
                         add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
                         add_time_ids = add_time_ids.repeat(batch_size, 1)
                         return add_time_ids
-                    encoder_hidden_states = empty_encoding
+                    encoder_hidden_states = empty_encoding.unsqueeze(1)
                     added_time_ids = _get_add_time_ids(
                         7, # fixed
                         127, # motion_bucket_id = 127, fixed
@@ -555,13 +574,15 @@ def main():
                     )
                     added_time_ids = added_time_ids.to(accelerator.device)
                     sigmas = torch.tensor([700.]).to(accelerator.device).to(encoder_hidden_states.dtype)
-                    timesteps = torch.Tensor(
+                    sigmas = sigmas[:, None, None, None, None]
+                    svd_timesteps = torch.Tensor(
                         [0.25 * sigma.log() for sigma in sigmas]).to(accelerator.device)
-                    timesteps = timesteps[:, None, None, None, None]
+                    rgb_latents = rgb_latents / vae.config.scaling_factor
                     unet_input = torch.cat((noisy_latents, rgb_latents), dim=1).to(accelerator.device)
                     unet_input = unet_input.unsqueeze(1) # from n c h w -> n t c h w
+                    
                     model_pred = unet(
-                        unet_input, timesteps, encoder_hidden_states, added_time_ids=added_time_ids).sample
+                        unet_input, svd_timesteps, encoder_hidden_states, added_time_ids=added_time_ids).sample
                     model_pred = model_pred.squeeze(1)
                 # End-to-end fine-tuning 
                 loss = torch.tensor(0.0, device=accelerator.device, requires_grad=True)
@@ -591,20 +612,21 @@ def main():
                     # Decode latent prediction
                     current_latent_estimate = current_latent_estimate / vae.config.scaling_factor
                     current_estimate = decode_image(vae, current_latent_estimate)
-
+                    current_estimate = current_estimate.to(torch.float32)
                     # Post-process predicted images and retrieve ground truth
                     if args.modality == "depth":
                         current_estimate = current_estimate.mean(dim=1, keepdim=True) 
                         current_estimate = torch.clamp(current_estimate,-1,1) 
-                        ground_truth = batch["metric"].to(device=accelerator.device, dtype=weight_dtype)
+                        # ground_truth = batch["metric"].to(device=accelerator.device, dtype=weight_dtype)
+                        ground_truth = batch["metric"].to(device=accelerator.device, dtype=torch.float32)
                     elif args.modality == "normals":
                         norm = torch.norm(current_estimate, p=2, dim=1, keepdim=True) + 1e-5
                         current_estimate = current_estimate / norm
                         current_estimate = torch.clamp(current_estimate,-1,1)
-                        ground_truth = batch["normals"].to(device=accelerator.device, dtype=weight_dtype)
+                        # ground_truth = batch["normals"].to(device=accelerator.device, dtype=weight_dtype)
+                        ground_truth = batch["normals"].to(device=accelerator.device, dtype=torch.float32)
                     else:
                         raise ValueError(f"Unknown modality {args.modality}")
-
                     # Compute task-specific loss   
                     estimation_loss = 0
                     if args.modality == "depth":              

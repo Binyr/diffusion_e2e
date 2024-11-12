@@ -101,16 +101,17 @@ class SynchronizedTransform_Hyper:
     
 # Virtual KITTI 2
 class SynchronizedTransform_VKITTI:
-    def __init__(self):
+    def __init__(self, H, W):
         self.to_tensor = transforms.ToTensor()
         self.horizontal_flip = transforms.RandomHorizontalFlip(p=1.0)
+        self.H, self.W = H, W
 
     # KITTI benchmark crop from Marigold:
     # https://github.com/prs-eth/Marigold/blob/62413d56099d36573b2de1eb8c429839734b7782/src/dataset/kitti_dataset.py#L75
     @staticmethod
-    def kitti_benchmark_crop(input_img):
-        KB_CROP_HEIGHT = 352
-        KB_CROP_WIDTH = 1216
+    def kitti_benchmark_crop(input_img, H=352, W=1216):
+        KB_CROP_HEIGHT = H
+        KB_CROP_WIDTH = W
         height, width = input_img.shape[-2:]
         top_margin = int(height - KB_CROP_HEIGHT)
         left_margin = int((width - KB_CROP_WIDTH) / 2)
@@ -160,14 +161,14 @@ class SynchronizedTransform_VKITTI:
 
 # Hypersim   
 class Hypersim(Dataset):
-    def __init__(self, root_dir, transform=True, near_plane=1e-5, far_plane=65.0):
+    def __init__(self, root_dir, transform=True, near_plane=1e-5, far_plane=65.0, H=480, W=640):
         self.root_dir   = root_dir
         self.split_path = os.path.join("data/hypersim/processed/train/filename_meta_train.csv")
         self.near_plane = near_plane
         self.far_plane  = far_plane
         self.align_cam_normal = True
         self.pairs = self._find_pairs()
-        self.transform =  SynchronizedTransform_Hyper(H=480, W=640) if transform else None
+        self.transform =  SynchronizedTransform_Hyper(H=H, W=W) if transform else None
 
     def _find_pairs(self):
         df = pd.read_csv(self.split_path)
@@ -286,12 +287,12 @@ class Hypersim(Dataset):
     
 # Virtual KITTI 2.0
 class VirtualKITTI2(Dataset):
-    def __init__(self, root_dir, transform=None, near_plane=1e-5, far_plane=80.0):
+    def __init__(self, root_dir, transform=None, near_plane=1e-5, far_plane=80.0, H=352, W=1216):
         self.root_dir = root_dir
         self.near_plane = near_plane
         self.far_plane  = far_plane
         self.pairs = self._find_pairs()
-        self.transform = SynchronizedTransform_VKITTI() if transform else None
+        self.transform = SynchronizedTransform_VKITTI(H=H, W=W) if transform else None
 
     def _find_pairs(self):
         scenes = ["Scene01", "Scene02", "Scene06", "Scene18", "Scene20"]
