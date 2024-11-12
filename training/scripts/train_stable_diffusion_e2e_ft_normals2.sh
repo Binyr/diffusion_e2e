@@ -5,9 +5,9 @@ CUDA_VISIBLE_DEVICES=1,0,2,3,4,5,6,7 accelerate launch --config_file 'configs/de
   --modality "normals" \
   --noise_type "zeros" \
   --max_train_steps 20000 \
-  --checkpointing_steps 5 \
+  --checkpointing_steps 4000 \
   --train_batch_size 1 \
-  --gradient_accumulation_steps 2 \
+  --gradient_accumulation_steps 1 \
   --gradient_checkpointing \
   --learning_rate 3e-05 \
   --lr_total_iter_length 20000 \

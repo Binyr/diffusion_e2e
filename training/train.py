@@ -330,7 +330,8 @@ def main():
                 for i, model in enumerate(models):
                     model.save_pretrained(os.path.join(output_dir, "unet"))
                     # make sure to pop weight so that corresponding model is not saved again
-                    weights.pop()
+                    if weights:
+                        weights.pop()
         def load_model_hook(models, input_dir):
             for _ in range(len(models)):
                 # pop models so that they are not loaded again
@@ -640,7 +641,7 @@ def main():
                 # Save model checkpoint 
                 if global_step % args.checkpointing_steps == 0:
                     logger.info(f"Entered Saving Code at global step {global_step} checkpointing_steps {args.checkpointing_steps}")
-                    if accelerator.is_main_process:
+                    if True or accelerator.is_main_process:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
