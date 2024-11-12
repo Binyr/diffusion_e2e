@@ -1,0 +1,11 @@
+{
+    "exclude": [
+    "data",
+    "__pycache__",
+    "**/__pycache__",
+    "glbs_000-096_acdfd305d5cd4059b151e2c215601964",
+    "outputs",
+    "ouputs",
+    "vis",
+  ],
+}

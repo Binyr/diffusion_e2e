@@ -217,6 +217,11 @@ def parse_args():
             " more information see https://huggingface.co/docs/accelerate/v0.17.0/en/package_reference/accelerator#accelerate.Accelerator"
         ),
     )
+    parser.add_argument(
+        "--use_svd",
+        type=bool,
+        default=False
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -361,9 +366,18 @@ def main():
     vkitti_root_dir   = "data/virtual_kitti_2"
     train_dataset_hypersim = Hypersim(root_dir=hypersim_root_dir, transform=True)
     train_dataset_vkitti   = VirtualKITTI2(root_dir=vkitti_root_dir, transform=True)
-    train_dataloader_vkitti   = torch.utils.data.DataLoader(train_dataset_vkitti,   shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers)
-    train_dataloader_hypersim = torch.utils.data.DataLoader(train_dataset_hypersim, shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers)
-    train_dataloader = MixedDataLoader(train_dataloader_hypersim, train_dataloader_vkitti, split1=9, split2=1)
+    mix_dataset = MixDataset([train_dataset_hypersim, train_dataset_vkitti])
+    sampler = RatioMixSampler(mix_dataset, [9, 1])
+    train_dataloader = torch.utils.data.DataLoader(
+        mix_dataset,
+        sampler=sampler,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=True
+    )
+    # train_dataloader_vkitti   = torch.utils.data.DataLoader(train_dataset_vkitti,   shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers)
+    # train_dataloader_hypersim = torch.utils.data.DataLoader(train_dataset_hypersim, shuffle=True, batch_size=args.train_batch_size, num_workers=args.dataloader_num_workers)
+    # train_dataloader = MixedDataLoader(train_dataloader_hypersim, train_dataloader_vkitti, split1=9, split2=1)
 
     # Prepare everything with `accelerator` (Move to GPU)
     unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -454,7 +468,10 @@ def main():
     # Pre-compute empty text CLIP encoding
     empty_token    = tokenizer([""], padding="max_length", truncation=True, return_tensors="pt").input_ids
     empty_token    = empty_token.to(accelerator.device)
-    empty_encoding = text_encoder(empty_token, return_dict=False)[0]
+    if not args.use_svd:
+        empty_encoding = text_encoder(empty_token, return_dict=False)[0]
+    else:
+        empty_encoding = text_encoder(empty_token, return_dict=False)[1]
     empty_encoding = empty_encoding.to(accelerator.device)
 
     # Get noise scheduling parameters for later conversion from a parameterized prediction into latent.
@@ -491,14 +508,60 @@ def main():
                     raise ValueError(f"Unknown noise type {args.noise_type}")
 
                 # Generate UNet prediction
-                encoder_hidden_states = empty_encoding.repeat(len(batch["rgb"]), 1, 1)
-                unet_input = (
-                    torch.cat((rgb_latents, noisy_latents), dim=1).to(accelerator.device)
-                    if args.noise_type is not None
-                    else rgb_latents
-                )   
-                model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0]
+                if not args.use_svd:
+                    encoder_hidden_states = empty_encoding.repeat(len(batch["rgb"]), 1, 1)
+                    unet_input = (
+                        torch.cat((rgb_latents, noisy_latents), dim=1).to(accelerator.device)
+                        if args.noise_type is not None
+                        else rgb_latents
+                    )   
+                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0]
+                else:
+                    def _get_add_time_ids(
+                        fps,
+                        motion_bucket_id,
+                        noise_aug_strength,
+                        dtype,
+                        batch_size,
+                    ):
+                        add_time_ids = [fps, motion_bucket_id, noise_aug_strength]
+                        # import pdb
+                        # pdb.set_trace()
+                        if hasattr(unet, "module"):
+                            passed_add_embed_dim = unet.module.config.addition_time_embed_dim * \
+                                len(add_time_ids)
+                            expected_add_embed_dim = unet.module.add_embedding.linear_1.in_features
+                        else:
+                            passed_add_embed_dim = unet.config.addition_time_embed_dim * \
+                                len(add_time_ids)
+                            expected_add_embed_dim = unet.add_embedding.linear_1.in_features
+                            
+                        if expected_add_embed_dim != passed_add_embed_dim:
+                            raise ValueError(
+                                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+                            )
 
+                        add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
+                        add_time_ids = add_time_ids.repeat(batch_size, 1)
+                        return add_time_ids
+                    encoder_hidden_states = empty_encoding
+                    added_time_ids = _get_add_time_ids(
+                        7, # fixed
+                        127, # motion_bucket_id = 127, fixed
+                        0.0, # noise_aug_strength == cond_sigmas
+                        encoder_hidden_states.dtype,
+                        len(batch["rgb"]),
+                    )
+                    added_time_ids = added_time_ids.to(accelerator.device)
+                    sigmas = torch.tensor([700.]).to(accelerator.device).to(encoder_hidden_states.dtype)
+                    timesteps = torch.Tensor(
+                        [0.25 * sigma.log() for sigma in sigmas]).to(accelerator.device)
+                    timesteps = timesteps[:, None, None, None, None]
+                    unet_input = torch.cat((noisy_latents, rgb_latents), dim=1).to(accelerator.device)
+                    unet_input = unet_input.unsqueeze(1) # from n c h w -> n t c h w
+                    model_pred = unet(
+                        unet_input, timesteps, encoder_hidden_states, added_time_ids=added_time_ids).sample
+                    model_pred = model_pred.squeeze(1)
                 # End-to-end fine-tuning 
                 loss = torch.tensor(0.0, device=accelerator.device, requires_grad=True)
                 if val_mask.any():

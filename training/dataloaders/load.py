@@ -10,7 +10,7 @@ import numpy as np
 import random
 import pandas as pd
 import cv2
-
+from collections import defaultdict
 #################
 # Dataset Mixer
 #################
@@ -23,6 +23,8 @@ class MixedDataLoader:
         self.split2 = split2
         self.frac1, self.frac2 = self.get_split_fractions()
         self.randchoice1=None
+        assert loader1.batch_size == loader2.batch_size
+        self.batch_size = loader1.batch_size
 
     def __iter__(self):
         self.loader_iter1 = iter(self.loader1)
@@ -35,7 +37,7 @@ class MixedDataLoader:
         size1 = len(self.loader1)
         size2 = len(self.loader2)
         effective_fraction1 = min((size2/size1) * (self.split1/self.split2), 1) 
-        effective_fraction2 = min((size1/size2) * (self.split2/self.split1), 1) 
+        effective_fraction2 = min((size1/size2) * (self.split2/self.split1), 1)
         print("Effective fraction for loader1: ", effective_fraction1)
         print("Effective fraction for loader2: ", effective_fraction2)
         return effective_fraction1, effective_fraction2
@@ -176,6 +178,7 @@ class Hypersim(Dataset):
                 depth_path = os.path.join(self.root_dir, "train", row['depth_path'])
                 head, _ = os.path.split(os.path.join(self.root_dir, "train"))
                 normal_dir = os.path.join(os.path.join(head, 'normals'), row['scene_name'], 'images', f'scene_{row["camera_name"]}_geometry_preview',f'frame.{str(row["frame_id"]).zfill(4) }.normal_cam.png')
+                # print(normal_dir)
                 if os.path.exists(rgb_path) and os.path.exists(depth_path) and os.path.exists(normal_dir):
                     pair_info = {'rgb_path': rgb_path, 'depth_path': depth_path, 'normal_path': normal_dir}    
                     pairs.append(pair_info)
@@ -374,3 +377,68 @@ class VirtualKITTI2(Dataset):
         normal_tensor[2,~valid_depth_mask.squeeze()] = 0
 
         return {"rgb": rgb_tensor, "depth": depth_tensor, 'metric': metric_tensor, 'normals': normal_tensor, "val_mask": valid_depth_mask, "domain": "outdoor"}
+
+
+class MixDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset_list):
+        # 
+        num_objects = 0
+        for dataset in dataset_list:
+            num_objects += len(dataset)
+        
+        # global idx
+        global_idxes = [x for x in range(num_objects)]
+
+        # local dataset and its idx
+        pairs = []
+        for did, dataset in enumerate(dataset_list):
+            pairs.extend([(did, i) for i in range(len(dataset))])
+        
+        # mapping
+        global_to_local = {}
+        did_to_global = defaultdict(list)
+        for gid, l_pair in zip(global_idxes, pairs):
+            global_to_local[gid] = l_pair
+            did_to_global[l_pair[0]].append(gid)
+        
+        self.global_to_local = global_to_local
+        self.did_to_global = did_to_global
+        self.dataset_list = dataset_list
+
+        print(f"merge {len(dataset_list)} dataset, total {num_objects} samples")
+    
+    def __len__(self, ):
+        return len(self.global_to_local)
+
+    def __getitem__(self, idx):
+        did, lid = self.global_to_local[idx]
+        return self.dataset_list[did].__getitem__(lid)
+
+
+class RatioMixSampler(torch.utils.data.Sampler):
+    def __init__(self, mix_dataset, ratios):
+        self.mix_dataset = mix_dataset
+        self.ratios = ratios
+        self.num_idxes1, self.num_idxes2 = self.get_split_fractions()
+    
+    def get_split_fractions(self):
+        size1 = len(self.mix_dataset.dataset_list[0])
+        size2 = len(self.mix_dataset.dataset_list[1])
+        split1 = self.ratios[0]
+        split2 = self.ratios[1]
+        effective_fraction1 = min((size2/size1) * (split1/split2), 1) 
+        effective_fraction2 = min((size1/size2) * (split2/split1), 1)
+        print("Effective fraction for loader1: ", effective_fraction1)
+        print("Effective fraction for loader2: ", effective_fraction2)
+        num_idxes1 = int(effective_fraction1 * size1)
+        num_idxes2 = int(effective_fraction2 * size2)
+        return num_idxes1, num_idxes2
+    
+    def __iter__(self, ):
+        idxes = []
+        idxes.extend(random.sample(self.mix_dataset.did_to_global[0], self.num_idxes1))
+        idxes.extend(random.sample(self.mix_dataset.did_to_global[1], self.num_idxes2))
+        return iter(idxes)
+    
+    def __len__(self, ):
+        return (self.num_idxes1 + self.num_idxes2)

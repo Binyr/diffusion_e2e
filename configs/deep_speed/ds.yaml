@@ -1,0 +1,32 @@
+compute_environment: LOCAL_MACHINE
+deepspeed_config:
+  deepspeed_multinode_launcher: standard 
+  gradient_accumulation_steps: 2
+  gradient_clipping: 1.0
+  offload_optimizer_device: none
+  offload_param_device: none
+  zero3_init_flag: false
+  zero_stage: 2
+
+distributed_type: DEEPSPEED
+#downcast_bf16: 'no'
+#dynamo_config:
+# dynamo_backend: INDUCTOR
+# dynamo_mode: default
+# dynamo_use_dynamic: false
+# dynamo_use_fullgraph: false
+fsdp_config: {}
+machine_rank: MACHINE_RANK
+main_process_port: 23457
+main_process_ip: CONFIG_CHIEF_IP
+main_training_function: main
+# megatron_lm_config: {}
+num_machines: CONFIG_HOST_NUM
+num_processes: CONFIG_NODE_NUM
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+mixed_precision: fp16
