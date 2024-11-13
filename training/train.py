@@ -14,7 +14,8 @@ import datasets
 import torch
 import torch.utils.checkpoint
 import transformers
-from accelerate import Accelerator
+from torch.utils.data import RandomSampler
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from packaging import version
@@ -34,7 +35,7 @@ from util.loss import ScaleAndShiftInvariantLoss, AngularLoss
 from util.unet_prep import replace_unet_conv_in
 from util.lr_scheduler import IterExponential
 from model import IntrinsicUNetSpatioTemporalConditionModel
-
+import time
 if is_wandb_available():
     import wandb
 
@@ -258,11 +259,13 @@ def main():
     # Init accelerator and logger
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
+    # ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        # kwargs_handlers=[ddp_kwargs]
     )
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -388,10 +391,11 @@ def main():
         train_dataset_vkitti   = VirtualKITTI2(root_dir=vkitti_root_dir, transform=True)
     mix_dataset = MixDataset([train_dataset_hypersim, train_dataset_vkitti])
     # sampler = RatioMixSampler(mix_dataset, [9, 1])
+    sampler = RandomSampler(mix_dataset)
     train_dataloader = torch.utils.data.DataLoader(
         mix_dataset,
-        shuffle=True,
-        # sampler=sampler,
+        # shuffle=True,
+        sampler=sampler,
         batch_size=args.train_batch_size,
         num_workers=args.dataloader_num_workers,
         pin_memory=True
@@ -505,16 +509,21 @@ def main():
         train_loss = 0.0
 
         for step, batch in enumerate(train_dataloader):
+            # progress_bar.update(1)
+            # global_step += 1
+            # if step < 150:
+            #     continue
             with accelerator.accumulate(unet):     
-                
+                val_mask = batch["val_mask"].bool().to(device=accelerator.device)
+                if not val_mask.any():
+                    continue
                 # RGB latent
                 # print(batch["rgb"].shape)
                 rgb_latents = encode_image(vae, batch["rgb"].to(device=accelerator.device, dtype=weight_dtype))
                 rgb_latents = rgb_latents * vae.config.scaling_factor
                 # print(rgb_latents.shape)
                 # Validity mask
-                val_mask = batch["val_mask"].bool().to(device=accelerator.device)
-
+                
                 # Set timesteps to the first denoising step
                 timesteps = torch.ones((rgb_latents.shape[0],), device=rgb_latents.device) * (noise_scheduler.config.num_train_timesteps-1) # 999
                 timesteps = timesteps.long()
@@ -589,7 +598,7 @@ def main():
                 # End-to-end fine-tuning 
                 loss = torch.tensor(0.0, device=accelerator.device, requires_grad=True)
                 if val_mask.any():
-
+                    # print(accelerator.local_process_index, step)
                     # Convert parameterized prediction into latent prediction.
                     # Code is based on the DDIM code from diffusers,
                     # https://github.com/huggingface/diffusers/blob/main/src/diffusers/schedulers/scheduling_ddim.py.
@@ -624,7 +633,7 @@ def main():
                     elif args.modality == "normals":
                         norm = torch.norm(current_estimate, p=2, dim=1, keepdim=True) + 1e-5
                         current_estimate = current_estimate / norm
-                        current_estimate = torch.clamp(current_estimate,-1,1)
+                        # current_estimate = torch.clamp(current_estimate,-1,1)
                         # ground_truth = batch["normals"].to(device=accelerator.device, dtype=weight_dtype)
                         ground_truth = batch["normals"].to(device=accelerator.device, dtype=torch.float32)
                     else:
@@ -637,30 +646,41 @@ def main():
                             estimation_loss = estimation_loss + estimation_loss_ssi
                     elif args.modality == "normals":
                         estimation_loss_ang_norm = angular_loss_norm(current_estimate, ground_truth, val_mask)
+                        # if accelerator.local_process_index == 7 and step == 158:
+                            # print("####", estimation_loss_ang_norm, current_estimate.mean(), ground_truth.mean())
                         if not torch.isnan(estimation_loss_ang_norm).any():
+                            # print(accelerator.local_process_index, step, "noNan", estimation_loss_ang_norm)
                             estimation_loss = estimation_loss + estimation_loss_ang_norm
+                        else: # loss = 0.0 should not backwards, otherwise process will block
+                            continue
                     else:
                         raise ValueError(f"Unknown modality {args.modality}")
                     loss = loss + estimation_loss
-                    
+                # print(accelerator.local_process_index, step, "loss", loss)
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
-
+                # print(accelerator.local_process_index, step, "gather_loss")
+                # time.sleep(np.random.uniform(0.01,0.1))
                 # Backpropagate
                 accelerator.backward(loss)
+                # print(accelerator.local_process_index, step, "backwards")
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                # print(accelerator.local_process_index, step, "clip grad")
                 optimizer.step()
+                # print(accelerator.local_process_index, step, "opt step")
                 lr_scheduler.step()
+                # print(accelerator.local_process_index, step, "lr step")
                 optimizer.zero_grad()
+                # print(accelerator.local_process_index, step, "opt zero_grad")
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
-                accelerator.log({"train_loss": train_loss}, step=global_step)
-                accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_step)
+                # accelerator.log({"train_loss": train_loss}, step=global_step)
+                # accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_step)
                 train_loss = 0.0
                 # Save model checkpoint 
                 if global_step % args.checkpointing_steps == 0:
