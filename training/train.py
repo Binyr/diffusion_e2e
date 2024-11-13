@@ -511,11 +511,16 @@ def main():
         for step, batch in enumerate(train_dataloader):
             # progress_bar.update(1)
             # global_step += 1
-            # if step < 150:
-            #     continue
+            if step < 75:
+                progress_bar.update(1)
+                global_step += 1
+                continue
             with accelerator.accumulate(unet):     
                 val_mask = batch["val_mask"].bool().to(device=accelerator.device)
-                if not val_mask.any():
+                valid_sample = val_mask.any()
+                valid_sample = accelerator.gather(valid_sample.repeat(args.train_batch_size))
+                # print(valid_sample.shape)
+                if not valid_sample.all():
                     continue
                 # RGB latent
                 # print(batch["rgb"].shape)
@@ -652,6 +657,7 @@ def main():
                             # print(accelerator.local_process_index, step, "noNan", estimation_loss_ang_norm)
                             estimation_loss = estimation_loss + estimation_loss_ang_norm
                         else: # loss = 0.0 should not backwards, otherwise process will block
+                            raise
                             continue
                     else:
                         raise ValueError(f"Unknown modality {args.modality}")
@@ -674,7 +680,7 @@ def main():
                 # print(accelerator.local_process_index, step, "lr step")
                 optimizer.zero_grad()
                 # print(accelerator.local_process_index, step, "opt zero_grad")
-
+            
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -682,8 +688,10 @@ def main():
                 # accelerator.log({"train_loss": train_loss}, step=global_step)
                 # accelerator.log({"lr": lr_scheduler.get_last_lr()[0]}, step=global_step)
                 train_loss = 0.0
-                # Save model checkpoint 
+                # Save model checkpoint
+                # print(accelerator.local_process_index, global_step) 
                 if global_step % args.checkpointing_steps == 0:
+                    accelerator.wait_for_everyone()
                     logger.info(f"Entered Saving Code at global step {global_step} checkpointing_steps {args.checkpointing_steps}")
                     if True or accelerator.is_main_process:
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
