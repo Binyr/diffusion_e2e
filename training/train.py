@@ -511,10 +511,10 @@ def main():
         for step, batch in enumerate(train_dataloader):
             # progress_bar.update(1)
             # global_step += 1
-            if step < 75:
-                progress_bar.update(1)
-                global_step += 1
-                continue
+            # if step < 75:
+            #     progress_bar.update(1)
+            #     global_step += 1
+            #     continue
             with accelerator.accumulate(unet):     
                 val_mask = batch["val_mask"].bool().to(device=accelerator.device)
                 valid_sample = val_mask.any()
@@ -638,7 +638,7 @@ def main():
                     elif args.modality == "normals":
                         norm = torch.norm(current_estimate, p=2, dim=1, keepdim=True) + 1e-5
                         current_estimate = current_estimate / norm
-                        # current_estimate = torch.clamp(current_estimate,-1,1)
+                        current_estimate = torch.clamp(current_estimate,-1,1)
                         # ground_truth = batch["normals"].to(device=accelerator.device, dtype=weight_dtype)
                         ground_truth = batch["normals"].to(device=accelerator.device, dtype=torch.float32)
                     else:
@@ -656,9 +656,13 @@ def main():
                         if not torch.isnan(estimation_loss_ang_norm).any():
                             # print(accelerator.local_process_index, step, "noNan", estimation_loss_ang_norm)
                             estimation_loss = estimation_loss + estimation_loss_ang_norm
+                            # should_skip = torch.tensor(False).bool().to(device=accelerator.device)
                         else: # loss = 0.0 should not backwards, otherwise process will block
                             raise
-                            continue
+                            # should_skip = torch.tensor(True).bool().to(device=accelerator.device)
+                        # should_skip = accelerator.gather(should_skip.repeat(args.train_batch_size))
+                        # if valid_sample.any():
+                        #     continue
                     else:
                         raise ValueError(f"Unknown modality {args.modality}")
                     loss = loss + estimation_loss
