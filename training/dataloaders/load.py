@@ -282,7 +282,10 @@ class Hypersim(Dataset):
         normal_tensor[1,~valid_depth_mask.squeeze()] = 0
         normal_tensor[2,~valid_depth_mask.squeeze()] = 0
             
-        return {"rgb": rgb_tensor, "depth": depth_tensor, 'metric': metric_tensor, 'normals': normal_tensor, "val_mask": valid_depth_mask, "domain": "indoor"}
+        return {"rgb": rgb_tensor, "depth": depth_tensor, 
+                'metric': metric_tensor, 'normals': normal_tensor, 
+                "val_mask": valid_depth_mask, "domain": "indoor",
+                "rgb_path": rgb_path}
 
     
 # Virtual KITTI 2.0

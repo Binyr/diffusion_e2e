@@ -36,6 +36,7 @@ from marigold import MarigoldPipeline
 from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 import random
+from pathlib import Path
 
 EXTENSION_LIST = [".jpg", ".jpeg", ".png"]
 
@@ -242,7 +243,7 @@ if "__main__" == __name__:
     # -------------------- Data --------------------
     rgb_filename_list = glob(os.path.join(input_rgb_dir, "*"))
     rgb_filename_list = [
-        f for f in rgb_filename_list if os.path.splitext(f)[1].lower() in EXTENSION_LIST
+        f for f in rgb_filename_list if os.path.splitext(f)[1].lower() in EXTENSION_LIST and "normal" not in Path(f).stem
     ]
     rgb_filename_list = sorted(rgb_filename_list)
     n_images = len(rgb_filename_list)
@@ -281,6 +282,9 @@ if "__main__" == __name__:
                                             torch_dtype=dtype, 
                                             )
 
+    # pipe = pipe.to(torch.float16)
+    # import pdb
+    # pdb.set_trace()
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except ImportError:
