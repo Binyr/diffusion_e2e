@@ -32,6 +32,7 @@ from diffusers import (
     LCMScheduler,
     UNet2DConditionModel,
     DDPMScheduler,
+    UNetSpatioTemporalConditionModel
 )
 from diffusers.utils import BaseOutput
 from PIL import Image
@@ -276,14 +277,24 @@ class MarigoldPipeline(DiffusionPipeline):
         # inference (batched)
         for batch in iterable:
             (batched_img,) = batch
-            pred_raw = self.single_infer(
-                rgb_in=batched_img,
-                num_inference_steps=denoising_steps,
-                show_pbar=show_progress_bar,
-                # add
-                noise=noise,
-                normals=normals,
-            )
+            if isinstance(self.unet, UNet2DConditionModel):
+                pred_raw = self.single_infer(
+                    rgb_in=batched_img,
+                    num_inference_steps=denoising_steps,
+                    show_pbar=show_progress_bar,
+                    # add
+                    noise=noise,
+                    normals=normals,
+                )
+            else:
+                pred_raw = self.single_infer_svd(
+                    rgb_in=batched_img,
+                    num_inference_steps=denoising_steps,
+                    show_pbar=show_progress_bar,
+                    # add
+                    noise=noise,
+                    normals=normals,
+                )
             pred_ls.append(pred_raw.detach())
         preds = torch.concat(pred_ls, dim=0).squeeze()
         torch.cuda.empty_cache()  # clear vram cache for ensembling
@@ -353,7 +364,7 @@ class MarigoldPipeline(DiffusionPipeline):
         )
 
 
-    def encode_empty_text(self):
+    def encode_empty_text(self, idx=0):
         """
         Encode text embedding for empty prompt
         """
@@ -366,7 +377,10 @@ class MarigoldPipeline(DiffusionPipeline):
             return_tensors="pt",
         )
         text_input_ids = text_inputs.input_ids.to(self.text_encoder.device)
-        self.empty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
+        if isinstance(self.unet, UNet2DConditionModel):
+            self.empty_text_embed = self.text_encoder(text_input_ids)[0].to(self.dtype)
+        else:
+            self.empty_text_embed = self.text_encoder(text_input_ids)[1].to(self.dtype)
 
     @torch.no_grad()
     def single_infer(
@@ -477,6 +491,153 @@ class MarigoldPipeline(DiffusionPipeline):
             depth = (depth + 1.0) / 2.0
             return depth
 
+
+    @torch.no_grad()
+    def single_infer_svd(
+        self,
+        rgb_in: torch.Tensor,
+        num_inference_steps: int,
+        show_pbar: bool,
+        # add
+        noise="gaussian",
+        normals=False,
+    ) -> torch.Tensor:
+        """
+        Perform an individual depth prediction without ensembling.
+
+        Args:
+            rgb_in (`torch.Tensor`):
+                Input RGB image.
+            num_inference_steps (`int`):
+                Number of diffusion denoisign steps (DDIM) during inference.
+            show_pbar (`bool`):
+                Display a progress bar of diffusion denoising.
+            noise (`str`, *optional*, defaults to `gaussian`):
+                Type of noise to be used for the initial depth map.
+                Can be one of `gaussian`, `pyramid`, `zeros`.
+        Returns:
+            `torch.Tensor`: Predicted depth map.
+        """
+        device = self.device
+        rgb_in = rgb_in.to(device)
+
+        # Set timesteps
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps  # [T]
+        
+        # Encode image
+        rgb_latent = self.encode_rgb(rgb_in)
+        rgb_latent = rgb_latent / self.rgb_latent_scale_factor
+        # add
+        # Initial prediction
+        latent_shape = rgb_latent.shape
+        if noise == "gaussian":
+            latent = torch.randn(
+                latent_shape,
+                device=device,
+                dtype=self.dtype,
+            )
+        elif noise == "pyramid":
+            latent = pyramid_noise_like(rgb_latent).to(device) # [B, 4, h, w]
+        elif noise == "zeros":
+            latent = torch.zeros(
+                latent_shape,
+                device=device,
+                dtype=self.dtype,
+            )
+        else:
+            raise ValueError(f"Unknown noise type: {noise}")
+
+        # Batched empty text embedding
+        if self.empty_text_embed is None:
+            self.encode_empty_text()
+        batch_empty_text_embed = self.empty_text_embed.unsqueeze(1) # [B, 2, 1024]
+
+        def _get_add_time_ids(
+                fps,
+                motion_bucket_id,
+                noise_aug_strength,
+                dtype,
+                batch_size,
+            ):
+                add_time_ids = [fps, motion_bucket_id, noise_aug_strength]
+                # import pdb
+                # pdb.set_trace()
+                unet = self.unet
+                if hasattr(unet, "module"):
+                    passed_add_embed_dim = unet.module.config.addition_time_embed_dim * \
+                        len(add_time_ids)
+                    expected_add_embed_dim = unet.module.add_embedding.linear_1.in_features
+                else:
+                    passed_add_embed_dim = unet.config.addition_time_embed_dim * \
+                        len(add_time_ids)
+                    expected_add_embed_dim = unet.add_embedding.linear_1.in_features
+                    
+                if expected_add_embed_dim != passed_add_embed_dim:
+                    raise ValueError(
+                        f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+                    )
+
+                add_time_ids = torch.tensor([add_time_ids], dtype=dtype)
+                add_time_ids = add_time_ids.repeat(batch_size, 1)
+                return add_time_ids
+
+        # Denoising loop
+        if show_pbar:
+            iterable = tqdm(
+                enumerate(timesteps),
+                total=len(timesteps),
+                leave=False,
+                desc=" " * 4 + "Diffusion denoising",
+            )
+        else:
+            iterable = enumerate(timesteps)
+
+        for i, t in iterable:
+            added_time_ids = _get_add_time_ids(
+                7, # fixed
+                127, # motion_bucket_id = 127, fixed
+                0.0, # noise_aug_strength == cond_sigmas
+                batch_empty_text_embed.dtype,
+                rgb_latent.shape[0],
+            )
+            added_time_ids = added_time_ids.to(self.unet.device)
+            sigmas = torch.tensor([700.]).to(self.unet.device).to(self.unet.dtype)
+            sigmas = sigmas[:, None, None, None, None]
+            svd_timesteps = torch.Tensor(
+                [0.25 * sigma.log() for sigma in sigmas]).to(self.unet.device)
+            unet_input = torch.cat((latent, rgb_latent), dim=1).to(self.unet.device)
+            unet_input = unet_input.unsqueeze(1) # from n c h w -> n t c h w
+            # import pdb
+            # pdb.set_trace()
+            # predict the noise residual
+            noise_pred = self.unet(
+                unet_input, svd_timesteps, encoder_hidden_states=batch_empty_text_embed, added_time_ids=added_time_ids
+            ).sample  # [B, 1, 4, h, w]
+            noise_pred = noise_pred.squeeze(1)
+            # compute the previous noisy sample x_t -> x_t-1
+            scheduler_step = self.scheduler.step(
+                noise_pred, t, latent
+            )
+        
+            latent = scheduler_step.prev_sample
+
+            # add
+            if i == num_inference_steps-1:
+                latent = scheduler_step.pred_original_sample 
+        
+        if normals:
+            # add
+            # decode and normalize normal vectors
+            normal = self.decode_normal(latent)
+            normal /= (torch.norm(normal, p=2, dim=1, keepdim=True)+1e-5)
+            return normal
+        else:      
+            # decode and normalize depth map          
+            depth = self.decode_depth(latent)
+            depth = torch.clip(depth, -1.0, 1.0)
+            depth = (depth + 1.0) / 2.0
+            return depth
 
     def encode_rgb(self, rgb_in: torch.Tensor) -> torch.Tensor:
         """

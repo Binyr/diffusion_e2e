@@ -1,0 +1,7 @@
+--exp_name svd
+--exp_id svd_e2e_ft
+--ckpt_path outputs/svd_e2e_ft_normals
+--model_type svd_marigold
+--eval_data all
+--processing_res 768
+--seed 1234

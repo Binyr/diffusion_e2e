@@ -127,7 +127,7 @@ def get_default_parser():
         "--model_type",
         type=str,
         default='marigold',
-        choices=["marigold", "geowizard"],
+        choices=["marigold", "geowizard", "svd_marigold"],
     )
     # Evaluation Settings
     parser.add_argument(

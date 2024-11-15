@@ -13,19 +13,19 @@ from PIL import Image
 from pathlib import Path
 import argparse
 from torch.utils.data import DataLoader
-from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel, UNetSpatioTemporalConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 
 import sys
-
+# sys.path.insert(0, "training")
 # add
 from DSINE.utils import utils, visualize as vis_utils
 from DSINE.projects.dsine import config
 from DSINE.projects.baseline_normal.dataloader import *
 from Marigold.marigold import MarigoldPipeline
 from GeoWizard.geowizard.models.geowizard_pipeline import DepthNormalEstimationPipeline
-
+from training.model import IntrinsicUNetSpatioTemporalConditionModel
 
 def test(args, model, test_loader, device):
 
@@ -194,6 +194,25 @@ if __name__ == '__main__':
                                                 variant=variant, 
                                                 torch_dtype=dtype, 
                                                 )
+    elif args.model_type == "svd_marigold":
+        variant = None
+        # import pdb
+        # pdb.set_trace()
+        unet         = UNetSpatioTemporalConditionModel.from_pretrained(checkpoint_path, subfolder="unet")   
+        vae          = AutoencoderKL.from_pretrained(checkpoint_path, subfolder="vae")  
+        text_encoder = CLIPTextModel.from_pretrained(checkpoint_path, subfolder="text_encoder")  
+        tokenizer    = CLIPTokenizer.from_pretrained(checkpoint_path, subfolder="tokenizer") 
+        scheduler    = DDIMScheduler.from_pretrained(checkpoint_path, timestep_spacing=args.timestep_spacing, subfolder="scheduler") 
+        model = MarigoldPipeline.from_pretrained(pretrained_model_name_or_path = "stabilityai/stable-diffusion-2",
+                                                unet=unet, 
+                                                vae=vae, 
+                                                scheduler=scheduler, 
+                                                text_encoder=text_encoder, 
+                                                tokenizer=tokenizer, 
+                                                variant=variant, 
+                                                torch_dtype=dtype, 
+                                                )
+
     else:
         raise ValueError(f"Invalid model type: {args.model_type}")
     try:

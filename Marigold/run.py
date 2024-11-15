@@ -33,7 +33,7 @@ from tqdm.auto import tqdm
 
 # add
 from marigold import MarigoldPipeline
-from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel, UNetSpatioTemporalConditionModel
 from transformers import CLIPTextModel, CLIPTokenizer
 import random
 from pathlib import Path
@@ -160,7 +160,14 @@ if "__main__" == __name__:
         type=str,
         default='trailing',
         choices=["trailing", "leading"],
-    ) 
+    )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default='marigold',
+        choices=["marigold", "svd_marigold"],
+    )  
+    
 
     args = parser.parse_args()
 
@@ -267,24 +274,39 @@ if "__main__" == __name__:
     # add
     # load Model
     logging.info(f"Loading Model: {checkpoint_path}")
-    unet         = UNet2DConditionModel.from_pretrained(checkpoint_path, subfolder="unet")   
-    vae          = AutoencoderKL.from_pretrained(checkpoint_path, subfolder="vae")  
-    text_encoder = CLIPTextModel.from_pretrained(checkpoint_path, subfolder="text_encoder")  
-    tokenizer    = CLIPTokenizer.from_pretrained(checkpoint_path, subfolder="tokenizer") 
-    scheduler    = DDIMScheduler.from_pretrained(checkpoint_path, timestep_spacing=timestep_spacing, subfolder="scheduler") 
-    pipe = MarigoldPipeline.from_pretrained(pretrained_model_name_or_path = checkpoint_path,
-                                            unet=unet, 
-                                            vae=vae, 
-                                            scheduler=scheduler, 
-                                            text_encoder=text_encoder, 
-                                            tokenizer=tokenizer, 
-                                            variant=variant, 
-                                            torch_dtype=dtype, 
-                                            )
+    if args.model_type != "svd_marigold":
+        unet         = UNet2DConditionModel.from_pretrained(checkpoint_path, subfolder="unet")   
+        vae          = AutoencoderKL.from_pretrained(checkpoint_path, subfolder="vae")  
+        text_encoder = CLIPTextModel.from_pretrained(checkpoint_path, subfolder="text_encoder")  
+        tokenizer    = CLIPTokenizer.from_pretrained(checkpoint_path, subfolder="tokenizer") 
+        scheduler    = DDIMScheduler.from_pretrained(checkpoint_path, timestep_spacing=timestep_spacing, subfolder="scheduler") 
+        pipe = MarigoldPipeline.from_pretrained(pretrained_model_name_or_path = checkpoint_path,
+                                                unet=unet, 
+                                                vae=vae, 
+                                                scheduler=scheduler, 
+                                                text_encoder=text_encoder, 
+                                                tokenizer=tokenizer, 
+                                                variant=variant, 
+                                                torch_dtype=dtype, 
+                                                )
+    else:
+        variant = None
+        unet         = UNetSpatioTemporalConditionModel.from_pretrained(checkpoint_path, subfolder="unet")   
+        vae          = AutoencoderKL.from_pretrained(checkpoint_path, subfolder="vae")  
+        text_encoder = CLIPTextModel.from_pretrained(checkpoint_path, subfolder="text_encoder")  
+        tokenizer    = CLIPTokenizer.from_pretrained(checkpoint_path, subfolder="tokenizer") 
+        scheduler    = DDIMScheduler.from_pretrained(checkpoint_path, timestep_spacing=args.timestep_spacing, subfolder="scheduler") 
+        pipe = MarigoldPipeline.from_pretrained(pretrained_model_name_or_path = "stabilityai/stable-diffusion-2",
+                                                unet=unet, 
+                                                vae=vae, 
+                                                scheduler=scheduler, 
+                                                text_encoder=text_encoder, 
+                                                tokenizer=tokenizer, 
+                                                variant=variant, 
+                                                torch_dtype=dtype, 
+                                                )
 
     # pipe = pipe.to(torch.float16)
-    # import pdb
-    # pdb.set_trace()
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except ImportError:
