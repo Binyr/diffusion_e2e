@@ -39,6 +39,10 @@ import time
 if is_wandb_available():
     import wandb
 
+from util.distiller import DINODistiller
+from util.svd_controlnet import DINOv2_Encoder, TrainPipeline
+from util.models import CustomUNet2DConditionModel
+
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.27.0.dev0")
 logger = get_logger(__name__, log_level="INFO")
@@ -224,6 +228,11 @@ def parse_args():
         type=bool,
         default=False
     )
+    parser.add_argument(
+        "--dino_distill_lambda",
+        default=None, 
+        type=float, 
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -303,7 +312,7 @@ def main():
     text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant)
     vae          = AutoencoderKL.from_pretrained(args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision, variant=args.variant)
     if not args.use_svd:
-        unet         = UNet2DConditionModel.from_pretrained( args.pretrained_model_name_or_path, subfolder="unet", revision=None)
+        unet         = CustomUNet2DConditionModel.from_pretrained( args.pretrained_model_name_or_path, subfolder="unet", revision=None)
     else:
         unet = IntrinsicUNetSpatioTemporalConditionModel.from_pretrained(
             "stabilityai/stable-video-diffusion-img2vid-xt",
@@ -317,6 +326,30 @@ def main():
         )
         unet.custom_gradient_checkpointing = True
 
+    dino_net = None
+    if args.dino_distill_lambda:
+        dino_distiller = None
+        
+        unet_feat_names = args.dino_distill_blocks.split(":")
+        dino_distiller = DINODistiller(
+            unet,
+            unet_feat_names=unet_feat_names,
+        )
+        if dino_net is None:
+            if args.dino_size is not None:
+                dino_size = args.dino_size
+                dino_net = DINOv2_Encoder(size=dino_size)
+            else:
+                dino_net = DINOv2_Encoder()
+            dino_net.eval()
+
+        unet = TrainPipeline(unet, None, None,
+            dino_distiller=dino_distiller,
+            unet_not_input_image=args.unet_not_input_image,
+            timestep_dino_controlnet_mode=args.timestep_dino_controlnet_mode
+        )
+    
+    
     if args.noise_type is not None:
         # Double UNet input layers if necessary
         if unet.config['in_channels'] != 8:
@@ -550,8 +583,25 @@ def main():
                         torch.cat((rgb_latents, noisy_latents), dim=1).to(accelerator.device)
                         if args.noise_type is not None
                         else rgb_latents
-                    )   
-                    model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0]
+                    )
+                    
+                    if args.dino_distill_lambda:
+                        dino_feat_distills = None
+                        pixel_values = batch["rgb"].to(device=accelerator.device, dtype=weight_dtype)
+                        B = pixel_values.shape[0]
+                        with torch.no_grad():
+                            dino_feat_distills = dino_net(pixel_values)
+                        
+                        if not isinstance(dino_feat_distills, list):
+                            dino_feat_distills = [dino_feat_distills]
+                        model_pred, dino_distill_loss = unet(
+                            unet_input, timesteps, encoder_hidden_states,
+                            dino_feat_distills=dino_feat_distills,
+                            return_dict=False,
+                        )
+                    else:   
+                        model_pred = unet(unet_input, timesteps, encoder_hidden_states, return_dict=False)[0]
+
                 else:
                     def _get_add_time_ids(
                         fps,
@@ -656,6 +706,8 @@ def main():
                         if not torch.isnan(estimation_loss_ang_norm).any():
                             # print(accelerator.local_process_index, step, "noNan", estimation_loss_ang_norm)
                             estimation_loss = estimation_loss + estimation_loss_ang_norm
+                            if args.dino_distill_lambda:
+                                estimation_loss = estimation_loss + args.dino_distill_lambda * dino_distill_loss
                             # should_skip = torch.tensor(False).bool().to(device=accelerator.device)
                         else: # loss = 0.0 should not backwards, otherwise process will block
                             raise
